@@ -10,6 +10,7 @@ A product PR caller invokes `.github/workflows/pr-gate.yml@v1` and supplies:
 - `requirements_file`
 - `cache_dependency_paths`
 - `typecheck_roots`
+- `typecheck_policy` (optional)
 - `governance_tests`
 - `critical_tests`
 
@@ -36,6 +37,7 @@ jobs:
       python_version: "3.12"
       requirements_file: requirements-dev.txt
       typecheck_roots: "tools"
+      typecheck_policy: "NO_NEW_ERRORS" # documented, Human-approved compatibility policy only
       governance_tests: "tests/test_governance.py"
       critical_tests: "tests/test_smoke.py tests/test_important_unit.py"
 ```
@@ -71,3 +73,7 @@ jobs:
 ## Compatibility rule
 
 `pytest-xdist` is the default post-merge execution model, but each existing repository must pass one bounded compatibility run before migration. A demonstrated incompatibility may use a documented Human-approved exception while retaining comprehensive coverage.
+
+## Mypy compatibility policy
+
+The optional `typecheck_policy` input accepts only `STRICT_CHANGED_FILES` and `NO_NEW_ERRORS`; its default is `STRICT_CHANGED_FILES`. A consuming repository must not pass `NO_NEW_ERRORS` until the referenced `@v1` declares that input. `NO_NEW_ERRORS` compares the base and head changed-production diagnostics as counted identities and fails on any new identity or excess count; it is not a typecheck bypass.

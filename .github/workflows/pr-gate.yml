@@ -27,6 +27,10 @@ on:
         required: false
         type: string
         default: "src tools app"
+      typecheck_policy:
+        required: false
+        type: string
+        default: "STRICT_CHANGED_FILES"
       governance_tests:
         required: true
         type: string
@@ -53,6 +57,7 @@ jobs:
       BASE_SHA: ${{ inputs.base_sha }}
       HEAD_SHA: ${{ inputs.head_sha }}
       TYPECHECK_ROOTS: ${{ inputs.typecheck_roots }}
+      TYPECHECK_POLICY: ${{ inputs.typecheck_policy }}
     steps:
       - name: Check out caller repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,9 +96,111 @@ jobs:
               fi
             done
           done < <(git diff --name-only --diff-filter=ACMRT "${BASE_SHA}" "${HEAD_SHA}" -- '*.py')
+          case "${TYPECHECK_POLICY}" in
+            STRICT_CHANGED_FILES|NO_NEW_ERRORS)
+              ;;
+            *)
+              echo "Unsupported typecheck_policy: ${TYPECHECK_POLICY}" >&2
+              exit 1
+              ;;
+          esac
           (( ${#files[@]} > 0 )) || { echo "No changed production Python files; type-check gate has nothing to inspect."; exit 0; }
           printf 'mypy target: %s\n' "${files[@]}"
-          python -m mypy --ignore-missing-imports --follow-imports=skip --show-error-codes -- "${files[@]}"
+          case "${TYPECHECK_POLICY}" in
+            STRICT_CHANGED_FILES)
+              python -m mypy --ignore-missing-imports --follow-imports=skip --show-error-codes -- "${files[@]}"
+              ;;
+            NO_NEW_ERRORS)
+              temporary_root="$(mktemp -d /tmp/ci-standards-mypy.XXXXXX)"
+              trap 'rm -rf "${temporary_root}"' EXIT
+              baseline_root="${temporary_root}/baseline"
+              head_root="${temporary_root}/head"
+              mkdir -p "${baseline_root}" "${head_root}"
+              git archive "${BASE_SHA}" | tar -x -C "${baseline_root}"
+              git archive "${HEAD_SHA}" | tar -x -C "${head_root}"
+
+              baseline_files=()
+              head_files=()
+              for path in "${files[@]}"; do
+                [[ -f "${baseline_root}/${path}" ]] && baseline_files+=("${path}")
+                [[ -f "${head_root}/${path}" ]] && head_files+=("${path}")
+              done
+              (( ${#head_files[@]} > 0 )) || { echo "Changed production Python files are unavailable at HEAD." >&2; exit 1; }
+
+              baseline_errors="${temporary_root}/baseline.errors"
+              head_errors="${temporary_root}/head.errors"
+              baseline_status=0
+              if (( ${#baseline_files[@]} > 0 )); then
+                (
+                  cd "${baseline_root}"
+                  python -m mypy --ignore-missing-imports --follow-imports=skip --show-error-codes -- "${baseline_files[@]}"
+                ) >"${baseline_errors}" 2>&1 || baseline_status=$?
+              else
+                : >"${baseline_errors}"
+              fi
+              head_status=0
+              (
+                cd "${head_root}"
+                python -m mypy --ignore-missing-imports --follow-imports=skip --show-error-codes -- "${head_files[@]}"
+              ) >"${head_errors}" 2>&1 || head_status=$?
+
+              python - "${baseline_status}" "${head_status}" "${baseline_errors}" "${head_errors}" <<'PY'
+          from collections import Counter
+          import json
+          import re
+          import sys
+
+          pattern = re.compile(
+              r"^(?P<path>.+?):[0-9]+(?::[0-9]+)?: error: "
+              r"(?P<message>.*) \[(?P<code>[^\]]+)\]$"
+          )
+          embedded_line = re.compile(r"\bline [0-9]+\b")
+
+          def fail(message: str) -> None:
+              print(message, file=sys.stderr)
+              raise SystemExit(1)
+
+          def identities(status: int, output_path: str) -> Counter[tuple[str, str, str, str]]:
+              if status >= 2:
+                  fail(f"mypy failed closed with exit {status}: {output_path}")
+              result: Counter[tuple[str, str, str, str]] = Counter()
+              for raw in open(output_path, encoding="utf-8", errors="strict"):
+                  line = raw.rstrip("\n")
+                  if not line or ": note: " in line or line.startswith("Found "):
+                      continue
+                  match = pattern.fullmatch(line)
+                  if match is None:
+                      if ": error: " in line:
+                          fail(f"Unparseable mypy error line: {line}")
+                      continue
+                  message = embedded_line.sub("line N", match["message"])
+                  result[(match["path"], "error", message, match["code"])] += 1
+              if status == 1 and not result:
+                  fail(f"mypy exit 1 without parseable error identities: {output_path}")
+              return result
+
+          baseline = identities(int(sys.argv[1]), sys.argv[3])
+          head = identities(int(sys.argv[2]), sys.argv[4])
+          excess = head - baseline
+          if excess:
+              print("NO_NEW_ERRORS policy rejected new mypy diagnostics:", file=sys.stderr)
+              for identity in sorted(excess):
+                  print(json.dumps({
+                      "code": identity[3],
+                      "excess_count": excess[identity],
+                      "message": identity[2],
+                      "path": identity[0],
+                      "severity": identity[1],
+                  }, sort_keys=True), file=sys.stderr)
+              raise SystemExit(1)
+          print("NO_NEW_ERRORS policy passed: no new mypy error identities or excess counts.")
+          PY
+              ;;
+            *)
+              echo "Unsupported typecheck_policy: ${TYPECHECK_POLICY}" >&2
+              exit 1
+              ;;
+          esac
 
   governance:
     needs: repository-safety
