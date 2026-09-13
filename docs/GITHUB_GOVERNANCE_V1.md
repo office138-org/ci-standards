@@ -33,6 +33,10 @@ Target: <= 3 minutes. Preferred target: 1-2 minutes.
 
 The PR gate must not duplicate the comprehensive post-merge suite.
 
+### Typecheck policy
+
+`STRICT_CHANGED_FILES` is the default policy. Every changed production Python file must satisfy the established mypy invocation with zero errors. A repository may explicitly select the bounded `NO_NEW_ERRORS` compatibility policy only when legacy pre-existing mypy debt is demonstrated and Human Approval is recorded. `NO_NEW_ERRORS` runs the same mypy invocation and version against BASE and HEAD, permits only baseline-existing error multiplicity, and rejects every new error identity or increased count. It is opt-in, does not disable type checking, and does not alter other repositories' default behavior. Materialization, parsing, comparison, or fatal mypy execution failure fails closed.
+
 ## Post-Merge Full Validation
 
 The comprehensive repository test tree must cover full regression, integration, E2E, and exhaustive validation. Python repositories use `pytest -n auto --dist worksteal` by default after bounded compatibility validation.
