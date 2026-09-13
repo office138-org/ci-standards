@@ -1,0 +1,85 @@
+name: Reusable Repository Safety
+
+on:
+  workflow_call:
+    inputs:
+      base_sha:
+        description: Base commit SHA for the change range.
+        required: true
+        type: string
+      head_sha:
+        description: Head commit SHA for the change range.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  repository-safety:
+    name: repository-safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate repository safety
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_commit_sha() {
+            [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]] && git cat-file -e "${1}^{commit}"
+          }
+
+          is_commit_sha "${BASE_SHA}" || { echo "Invalid or unavailable base SHA: ${BASE_SHA}" >&2; exit 1; }
+          is_commit_sha "${HEAD_SHA}" || { echo "Invalid or unavailable head SHA: ${HEAD_SHA}" >&2; exit 1; }
+
+          git -c core.whitespace=cr-at-eol diff --check "${BASE_SHA}..${HEAD_SHA}"
+
+          is_forbidden_path() {
+            case "$1" in
+              .env|.env.*|*/.env|*/.env.*|docs/exports/*|runs.jsonl|*/runs.jsonl|*.key|*.pem|*.pwd)
+                return 0 ;;
+              *)
+                return 1 ;;
+            esac
+          }
+
+          forbidden_tracked=0
+          while IFS= read -r -d '' path; do
+            if is_forbidden_path "${path}"; then
+              printf 'Forbidden tracked path: %q\n' "${path}" >&2
+              forbidden_tracked=1
+            fi
+          done < <(git ls-tree -r -z --name-only "${HEAD_SHA}")
+          (( forbidden_tracked == 0 )) || exit 1
+
+          forbidden_changed=0
+          while IFS= read -r -d '' status; do
+            IFS= read -r -d '' old_path || { echo "Malformed name-status output" >&2; exit 1; }
+            case "${status}" in
+              R*|C*)
+                IFS= read -r -d '' new_path || { echo "Malformed rename/copy output" >&2; exit 1; }
+                if is_forbidden_path "${new_path}"; then
+                  printf 'Forbidden changed path (%q): %q\n' "${status}" "${new_path}" >&2
+                  forbidden_changed=1
+                fi
+                ;;
+              D*) ;;
+              *)
+                if is_forbidden_path "${old_path}"; then
+                  printf 'Forbidden changed path (%q): %q\n' "${status}" "${old_path}" >&2
+                  forbidden_changed=1
+                fi
+                ;;
+            esac
+          done < <(git diff --name-status -z --find-renames "${BASE_SHA}" "${HEAD_SHA}")
+          (( forbidden_changed == 0 )) || exit 1

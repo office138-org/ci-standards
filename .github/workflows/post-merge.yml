@@ -1,0 +1,125 @@
+name: Reusable Post-Merge Full Validation
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        required: false
+        type: string
+        default: "3.12"
+      requirements_file:
+        required: false
+        type: string
+        default: requirements-dev.txt
+      cache_dependency_paths:
+        required: false
+        type: string
+        default: |
+          requirements.txt
+          requirements-dev.txt
+      pytest_root:
+        required: false
+        type: string
+        default: tests/
+      xdist_workers:
+        required: false
+        type: string
+        default: auto
+      xdist_mode:
+        required: false
+        type: string
+        default: worksteal
+      require_pr_provenance:
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  full-regression:
+    name: full-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENABLE_CLAUDE_CLI: "false"
+      ENABLE_CODEX_CLI: "false"
+      ENABLE_GEMINI_CLI: "false"
+      SIGNIFIER_ENABLE_SHADOW_HELPER: "false"
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify default-branch push came from a merged PR
+        if: github.event_name == 'push' && inputs.require_pr_provenance
+        env:
+          API_URL: ${{ github.api_url }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          url = (
+              f"{os.environ['API_URL']}/repos/{os.environ['REPOSITORY']}"
+              f"/commits/{os.environ['SHA']}/pulls"
+          )
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              pulls = json.load(response)
+
+          default_branch = os.environ["DEFAULT_BRANCH"]
+          merged = [
+              pr
+              for pr in pulls
+              if pr.get("merged_at")
+              and pr.get("base", {}).get("ref") == default_branch
+          ]
+          if not merged:
+              raise SystemExit(
+                  "GOVERNANCE_VIOLATION_DIRECT_MAIN_PUSH: "
+                  "default-branch push is not associated with a merged pull request"
+              )
+          print("PR provenance PASS:", ", ".join(f"#{pr['number']}" for pr in merged))
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.cache_dependency_paths }}
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install -r "${{ inputs.requirements_file }}"
+          python -m pip check
+
+      - name: Verify pytest-xdist
+        run: python -c "import xdist; print('pytest-xdist', xdist.__version__)"
+
+      - name: Run comprehensive regression, integration, E2E, and exhaustive suite
+        run: >-
+          python -m pytest -q
+          -n "${{ inputs.xdist_workers }}"
+          --dist "${{ inputs.xdist_mode }}"
+          --durations=20
+          "${{ inputs.pytest_root }}"

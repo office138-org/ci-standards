@@ -1,0 +1,77 @@
+name: Reusable Governance and Critical Tests
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        required: false
+        type: string
+        default: "3.12"
+      requirements_file:
+        required: false
+        type: string
+        default: requirements-dev.txt
+      cache_dependency_paths:
+        required: false
+        type: string
+        default: |
+          requirements.txt
+          requirements-dev.txt
+      governance_tests:
+        description: Space-separated pytest paths for governance validation.
+        required: true
+        type: string
+      critical_tests:
+        description: Space-separated pytest paths for critical smoke and important unit tests.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    name: governance-and-critical
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GOVERNANCE_TESTS: ${{ inputs.governance_tests }}
+      CRITICAL_TESTS: ${{ inputs.critical_tests }}
+      ENABLE_CLAUDE_CLI: "false"
+      ENABLE_CODEX_CLI: "false"
+      ENABLE_GEMINI_CLI: "false"
+      SIGNIFIER_ENABLE_SHADOW_HELPER: "false"
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.cache_dependency_paths }}
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install -r "${{ inputs.requirements_file }}"
+          python -m pip check
+
+      - name: Run governance validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a tests <<< "${GOVERNANCE_TESTS}"
+          (( ${#tests[@]} > 0 )) || { echo "Governance tests are mandatory." >&2; exit 1; }
+          python -m pytest -q -- "${tests[@]}"
+
+      - name: Run critical smoke and important unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a tests <<< "${CRITICAL_TESTS}"
+          (( ${#tests[@]} > 0 )) || { echo "Critical tests are mandatory." >&2; exit 1; }
+          python -m pytest -q --durations=10 -- "${tests[@]}"
